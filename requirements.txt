@@ -1,0 +1,5 @@
+# 필요한 패키지 목록
+pandas
+openpyxl
+playwright
+pyinstaller
