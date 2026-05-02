@@ -1,5 +1,10 @@
 from src.browser import open_browser, close_browser
+from src.config import USE_FILE_DATA_FIRST, USE_BROWSER_DETAIL_COMPLEMENT
 from src.excel_writer import save_to_excel
+from src.filedata_client import (
+    fetch_file_data_products,
+    map_file_item_to_row
+)
 from src.g2b_page import (
     search_by_item_number,
     get_product_result_count,
@@ -11,10 +16,6 @@ from src.g2b_page import (
 
 
 def notify(message, status_callback=None):
-    """
-    터미널과 GUI 양쪽에 상태 메시지를 전달하기 위한 함수.
-    """
-
     print(message)
 
     if status_callback:
@@ -22,10 +23,6 @@ def notify(message, status_callback=None):
 
 
 def normalize_url(url):
-    """
-    URL 기준 중복 판단을 위해 문자열을 정리한다.
-    """
-
     if url is None:
         return ""
 
@@ -45,25 +42,56 @@ def make_empty_row(
     result_order="",
     same_number_result_count=""
 ):
-    """
-    결과 엑셀에 저장할 기본 행 데이터를 만든다.
-    """
-
     return {
         "물품식별번호": item_number,
         "검색결과순번": result_order,
         "동일번호결과수": same_number_result_count,
         "상품명": "",
         "업체명": "",
+        "계약번호": "",
+        "계약변경차수": "",
+        "계약단가": "",
+        "계약기간": "",
+        "MAS여부": "",
+        "계약유형": "",
+        "공급지역": "",
+        "인도조건": "",
+        "쇼핑몰등록일자": "",
+        "업체사업자등록번호": "",
         "상세페이지링크": "",
         "구성": "",
         "옵션/기타": "",
+        "수집방식": "",
         "처리상태": status,
         "오류내용": error_message
     }
 
 
-def collect_one_search_result(
+def merge_rows(base_row, detail_row):
+    """
+    CSV 기본정보와 브라우저 상세정보를 합친다.
+    """
+
+    merged = dict(base_row)
+
+    for key, value in detail_row.items():
+        value = "" if value is None else str(value).strip()
+
+        if not value:
+            continue
+
+        # 브라우저 상세에서 더 정확히 가져오는 값
+        if key in ["상품명", "업체명", "상세페이지링크", "구성", "옵션/기타"]:
+            merged[key] = value
+
+        # CSV에 비어 있는 값만 보완
+        elif key not in merged or not str(merged.get(key, "")).strip():
+            merged[key] = value
+
+    return merged
+
+
+def collect_browser_detail_by_index(
     page,
     item_number,
     result_index,
@@ -71,13 +99,7 @@ def collect_one_search_result(
     item_progress_callback=None
 ):
     """
-    같은 물품식별번호 검색 결과 중 특정 순번 하나를 수집한다.
-
-    반환:
-    - row
-    - dedupe_url
-
-    dedupe_url은 공유 버튼에서 추출한 실제 상세페이지 링크를 기준으로 한다.
+    검색 결과 중 특정 순번의 상품을 브라우저로 상세 수집한다.
     """
 
     def update_item_progress(percent, message):
@@ -118,20 +140,17 @@ def collect_one_search_result(
         detail_info["상세페이지링크"] = detail_page.url
         dedupe_url = normalize_url(detail_page.url)
 
-    row = make_empty_row(
+    detail_row = make_empty_row(
         item_number=item_number,
-        status="상품정보수집완료",
+        status="브라우저상세수집완료",
         result_order=result_order,
         same_number_result_count=result_count
     )
 
-    row.update(detail_info)
+    detail_row.update(detail_info)
 
     if not share_link:
-        row["처리상태"] = "상품정보수집완료_공유링크확인필요"
-
-    if not row["구성"] and not row["옵션/기타"]:
-        row["처리상태"] = "상세페이지진입완료_추출확인필요"
+        detail_row["처리상태"] = "브라우저상세수집완료_공유링크확인필요"
 
     if detail_page != page:
         try:
@@ -139,92 +158,208 @@ def collect_one_search_result(
         except Exception:
             pass
 
-    return row, dedupe_url
+    return detail_row, dedupe_url
 
 
-def collect_product_info(page, item_number, item_progress_callback=None):
+def collect_product_info_csv_only(item_number, file_items):
     """
-    물품식별번호 하나를 검색하고, 검색 결과에 나온 모든 상품을 수집한다.
+    CSV 결과만 저장한다.
+    """
 
-    핵심:
-    - 같은 물품식별번호에서 여러 검색 결과가 나오면 전부 확인한다.
-    - 단, 공유 버튼에서 추출한 상세페이지 URL이 이미 수집된 URL이면 중복으로 보고 저장하지 않는다.
+    rows = []
+    total_count = len(file_items)
 
-    반환값:
-    [
-        row1,
-        row2,
-        ...
-    ]
+    for index, file_item in enumerate(file_items, start=1):
+        row = map_file_item_to_row(
+            file_item=file_item,
+            item_number=item_number,
+            result_order=index,
+            total_count=total_count
+        )
+
+        row["수집방식"] = "CSV"
+        row["처리상태"] = "CSV수집완료"
+
+        rows.append(row)
+
+    return rows
+
+
+def collect_product_info_hybrid(page, item_number, file_items, item_progress_callback=None):
+    """
+    CSV로 기본정보를 먼저 가져오고,
+    브라우저로 구성/옵션/공유링크를 보완한다.
     """
 
     def update_item_progress(percent, message):
         if item_progress_callback:
             item_progress_callback(percent, message)
 
+    csv_rows = []
+
+    for index, file_item in enumerate(file_items, start=1):
+        csv_rows.append(
+            map_file_item_to_row(
+                file_item=file_item,
+                item_number=item_number,
+                result_order=index,
+                total_count=len(file_items)
+            )
+        )
+
     collected_rows = []
     seen_detail_urls = set()
 
-    update_item_progress(20, f"{item_number} 검색 중")
+    update_item_progress(20, f"{item_number} 브라우저 검색 중")
 
     search_by_item_number(page, item_number)
 
     update_item_progress(35, f"{item_number} 검색 결과 확인 중")
 
-    result_count = get_product_result_count(page, item_number)
+    browser_result_count = get_product_result_count(page, item_number)
 
-    if result_count == 0:
+    if browser_result_count == 0:
+        if csv_rows:
+            for row in csv_rows:
+                row["수집방식"] = "CSV"
+                row["처리상태"] = "CSV수집완료_브라우저결과없음"
+            return csv_rows
+
         raise Exception(f"검색 결과가 없습니다: {item_number}")
 
-    print(f"{item_number} 검색 결과 개수: {result_count}개")
+    total_result_count = max(browser_result_count, len(csv_rows))
 
-    for result_index in range(result_count):
+    print(
+        f"{item_number} 결과 개수: "
+        f"CSV={len(csv_rows)}건, 브라우저={browser_result_count}건"
+    )
+
+    for result_index in range(browser_result_count):
         result_order = result_index + 1
 
-        # 첫 번째 결과는 이미 검색된 화면을 사용한다.
-        # 두 번째 결과부터는 상세페이지에서 돌아오는 상태 꼬임을 막기 위해 다시 검색한다.
         if result_index > 0:
             update_item_progress(
                 10,
-                f"{item_number} {result_order}/{result_count}번째 결과 검색 준비 중"
+                f"{item_number} {result_order}/{browser_result_count}번째 결과 검색 준비 중"
             )
 
             reset_to_main_page(page)
 
             update_item_progress(
                 20,
-                f"{item_number} {result_order}/{result_count}번째 결과 재검색 중"
+                f"{item_number} {result_order}/{browser_result_count}번째 결과 재검색 중"
             )
 
             search_by_item_number(page, item_number)
 
-        row, dedupe_url = collect_one_search_result(
+        detail_row, dedupe_url = collect_browser_detail_by_index(
             page=page,
             item_number=item_number,
             result_index=result_index,
-            result_count=result_count,
+            result_count=browser_result_count,
             item_progress_callback=item_progress_callback
         )
 
-        # URL 기준 중복 제거
+        if result_index < len(csv_rows):
+            base_row = csv_rows[result_index]
+        else:
+            base_row = make_empty_row(
+                item_number=item_number,
+                status="브라우저상세수집완료",
+                result_order=result_order,
+                same_number_result_count=total_result_count
+            )
+
+        merged_row = merge_rows(base_row, detail_row)
+
+        merged_row["검색결과순번"] = result_order
+        merged_row["동일번호결과수"] = total_result_count
+        merged_row["수집방식"] = "CSV+브라우저"
+        merged_row["처리상태"] = "상품정보수집완료"
+
+        if not merged_row.get("구성") and not merged_row.get("옵션/기타"):
+            merged_row["처리상태"] = "상품정보수집완료_상세속성확인필요"
+
         if dedupe_url:
             if dedupe_url in seen_detail_urls:
                 print(
                     f"중복 상세페이지 URL 감지로 저장 제외: "
-                    f"{item_number} {result_order}/{result_count}번째, {dedupe_url}"
+                    f"{item_number} {result_order}/{browser_result_count}번째, {dedupe_url}"
                 )
                 continue
 
             seen_detail_urls.add(dedupe_url)
 
-        collected_rows.append(row)
+        collected_rows.append(merged_row)
 
-    update_item_progress(95, f"{item_number} 결과 정리 중")
+    # CSV에는 있는데 브라우저 결과 순번으로는 처리하지 못한 나머지 보존
+    if len(csv_rows) > browser_result_count:
+        for remain_index in range(browser_result_count, len(csv_rows)):
+            row = csv_rows[remain_index]
+            row["수집방식"] = "CSV"
+            row["처리상태"] = "CSV수집완료_브라우저미보완"
+            collected_rows.append(row)
 
     if not collected_rows:
         raise Exception(f"중복 제외 후 저장할 상품이 없습니다: {item_number}")
 
+    update_item_progress(95, f"{item_number} 결과 정리 중")
+
     return collected_rows
+
+
+def collect_product_info_browser_only(page, item_number, item_progress_callback=None):
+    """
+    CSV 결과가 없을 때 기존 브라우저 방식으로만 수집한다.
+    """
+
+    return collect_product_info_hybrid(
+        page=page,
+        item_number=item_number,
+        file_items=[],
+        item_progress_callback=item_progress_callback
+    )
+
+
+def collect_product_info(page, item_number, item_progress_callback=None):
+    """
+    물품식별번호 하나를 수집한다.
+
+    우선순위:
+    1. CSV 파일데이터에서 기본 계약정보 조회
+    2. 설정에 따라 브라우저로 구성/옵션/공유링크 보완
+    3. CSV 결과가 없으면 브라우저 방식으로 fallback
+    """
+
+    def update_item_progress(percent, message):
+        if item_progress_callback:
+            item_progress_callback(percent, message)
+
+    file_items = []
+
+    if USE_FILE_DATA_FIRST:
+        update_item_progress(5, f"{item_number} CSV 데이터 조회 중")
+        file_items = fetch_file_data_products(item_number)
+
+    if file_items and not USE_BROWSER_DETAIL_COMPLEMENT:
+        update_item_progress(90, f"{item_number} CSV 결과 정리 중")
+        return collect_product_info_csv_only(item_number, file_items)
+
+    if file_items and USE_BROWSER_DETAIL_COMPLEMENT:
+        return collect_product_info_hybrid(
+            page=page,
+            item_number=item_number,
+            file_items=file_items,
+            item_progress_callback=item_progress_callback
+        )
+
+    update_item_progress(10, f"{item_number} CSV 결과 없음, 브라우저 수집으로 전환")
+
+    return collect_product_info_browser_only(
+        page=page,
+        item_number=item_number,
+        item_progress_callback=item_progress_callback
+    )
 
 
 def collect_all_products(
@@ -236,11 +371,6 @@ def collect_all_products(
 ):
     """
     input.xlsx에서 읽은 물품식별번호 목록을 순회하면서 상품 정보를 수집한다.
-
-    변경점:
-    - 물품식별번호 1개에서 검색 결과가 여러 개 나오면 전부 확인한다.
-    - 상세페이지 공유 URL이 같은 상품은 중복으로 판단하여 저장하지 않는다.
-    - 가격/계약이 달라 URL이 다르면 같은 물품식별번호라도 별도 행으로 저장한다.
     """
 
     results = []

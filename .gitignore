@@ -1,37 +1,29 @@
-# Python
+# Python cache
 __pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-.Python
+*.pyc
 
 # Virtual environment
 .venv/
 venv/
-env/
 
-# PyInstaller
+# Environment variables
+.env
+
+# Build outputs
 build/
 dist/
 *.spec
 
-# Playwright browsers
-ms-playwright/
-.local-browsers/
-
-# Excel input/output data
+# Data files
 data/input.xlsx
-data/*.xlsx
+data/g2b_items.csv
 output/
-*.xlsx
-
-# Logs
 logs/
-*.log
+
+# Excel result files
+*.xlsx
+*.xls
 
 # OS files
 .DS_Store
 Thumbs.db
-
-# VS Code local settings
-.vscode/
